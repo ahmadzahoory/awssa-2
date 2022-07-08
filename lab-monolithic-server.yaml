@@ -1,0 +1,138 @@
+Description:  This template deploys a VPC, with a pair of public and private subnets spread across two Availability Zones. It deploys an internet gateway, with a default route on the public subnets. 
+
+Parameters:
+  EnvironmentName:
+    Description: An environment name that is prefixed to resource names
+    Type: String
+    Default: Monolithic-Server
+
+  UbuntuAMIId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/canonical/ubuntu/server/20.04/stable/current/amd64/hvm/ebs-gp2/ami-id
+
+  KeyName:
+    Description: EC2 KeyPair to enable SSH access to the instances
+    Type: AWS::EC2::KeyPair::KeyName
+    Default: My-SA-LAB-KP
+    ConstraintDescription: must be the name of an existing EC2 KeyPair.
+
+  VpcCIDR:
+    Description: IP range (CIDR notation) for this VPC
+    Type: String
+    Default: 192.168.0.0/24
+
+  PublicSubnetCIDR:
+    Description: IP range (CIDR notation) for the public subnet in the first Availability Zone
+    Type: String
+    Default: 192.168.0.0/24
+
+Resources:
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCIDR
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: !Ref EnvironmentName
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Ref EnvironmentName
+
+  InternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref VPC
+
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [ 0, !GetAZs '' ]
+      CidrBlock: !Ref PublicSubnetCIDR
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: Public Subnet
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName} Public Routes 
+ 
+  DefaultPublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnet
+
+  WebServerSG:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupDescription: WebApp-Server
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: WebApp-Server
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        
+  WebInstance:
+    Type: 'AWS::EC2::Instance'
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      ImageId: !Ref UbuntuAMIId
+      Tags:
+        - Key: Name
+          Value: WebApp-Server
+      InstanceType: t2.micro
+      KeyName: !Ref KeyName
+      SubnetId: !Ref PublicSubnet
+      SecurityGroupIds:
+        - !Ref WebServerSG
+      UserData:
+        Fn::Base64: !Sub |
+            #!/bin/bash
+            apt-get -y update
+            apt-get install -y nodejs
+            apt-get install -y npm
+            apt-get install -y unzip
+            npm install koa@1.2.5
+            npm install koa-router@5.4.0
+            npm install forever -g
+            wget https://raw.githubusercontent.com/ahmadzahoory/awssa/master/aws-lab-m16-monolithic-code.zip
+            unzip aws-lab-m16-monolithic-code.zip
+            forever start server.js
+            iptables -A PREROUTING -t nat -i eth0 -p tcp --dport 80 -j REDIRECT --to-port 3000
+            
+  EIP:
+    Type: 'AWS::EC2::EIP'
+    Properties:
+      InstanceId: !Ref WebInstance
+
+
+Outputs:
+  EC2PublicIP:
+    Description: WebApp Server Public IP address
+    Value: !Ref EIP
+
